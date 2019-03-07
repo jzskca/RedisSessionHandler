@@ -81,6 +81,13 @@ class RedisSessionHandler extends \SessionHandler
     private $cookieName;
 
     /**
+     * Whether or not we are talking to Redis in cluster mode.
+     *
+     * @var bool
+     */
+    private $clustered;
+
+    /**
      * @throws \RuntimeException When the phpredis extension is not available.
      */
     public function __construct()
@@ -89,7 +96,7 @@ class RedisSessionHandler extends \SessionHandler
             throw new \RuntimeException("the 'redis' extension is needed in order to use this session handler");
         }
 
-        $this->redis = new \Redis();
+        $this->clustered = ini_get_all('session')['session.save_handler']['global_value'] == 'rediscluster';
         $this->lock_ttl = (int) ini_get('max_execution_time');
         $this->session_ttl = (int) ini_get('session.gc_maxlifetime');
     }
@@ -101,20 +108,32 @@ class RedisSessionHandler extends \SessionHandler
     {
         $this->cookieName = $name;
 
-        list(
-            $host, $port, $timeout, $prefix, $auth, $database
-        ) = SavePathParser::parse($save_path);
+        if ($this->clustered) {
+            // For simplicity, only a cluster name is supported
+            $this->redis = new \RedisCluster($save_path);
 
-        if (false === $this->redis->connect($host, $port, $timeout)) {
-            return false;
-        }
+            $prefix =  SavePathParser::DEFAULT_PREFIX;
 
-        if (SavePathParser::DEFAULT_AUTH !== $auth) {
-            $this->redis->auth($auth);
-        }
+            // Always distribute readonly commands between masters and slaves, at random
+            $this->redis->setOption(\RedisCluster::OPT_SLAVE_FAILOVER, \RedisCluster::FAILOVER_DISTRIBUTE);
+        } else {
+            list(
+                $host, $port, $timeout, $prefix, $auth, $database
+            ) = SavePathParser::parse($save_path);
 
-        if (SavePathParser::DEFAULT_DATABASE !== $database) {
-            $this->redis->select($database);
+            $this->redis = new \Redis();
+
+            if (false === $this->redis->connect($host, $port, $timeout)) {
+                return false;
+            }
+
+            if (SavePathParser::DEFAULT_AUTH !== $auth) {
+                $this->redis->auth($auth);
+            }
+
+            if (SavePathParser::DEFAULT_DATABASE !== $database) {
+                $this->redis->select($database);
+            }
         }
 
         $this->redis->setOption(\Redis::OPT_PREFIX, $prefix);
